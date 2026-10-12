@@ -2,18 +2,18 @@ name: Twitter Monitor
 
 on:
   schedule:
-    # 北京时间 08:00 - 22:00 (UTC 00:00 - 14:00) 每 30 分钟一次
-    - cron: '*/30 0-13 * * *'
-    # 北京时间 22:00 - 08:00 (UTC 14:00 - 00:00) 每 2 小时一次
-    - cron: '0 14-23/2 * * *'
+    # UTC+8 09:00 - 23:00（对应 UTC 01:00 - 15:00）每 5 分钟一次
+    - cron: '*/5 1-15 * * *'
+    # 其他时间每 15 分钟一次
+    - cron: '*/15 0,16-23 * * *'
   workflow_dispatch:
     # 允许手动触发
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    # 单次执行最多 8 分钟
-    timeout-minutes: 8
+    # 单次执行最多 12 分钟
+    timeout-minutes: 12
     permissions:
       contents: write  # 允许提交代码(更新 last_id.json)
     
