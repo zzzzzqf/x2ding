@@ -14,6 +14,7 @@ import base64
 USERS_STR = os.environ.get('TWITTER_USER', 'elonmusk')
 USERS = [u.strip() for u in USERS_STR.split(',') if u.strip()]
 WEBHOOK_URL = os.environ.get('DINGTALK_WEBHOOK')
+KEYWORDS = ['alpha', '空投', 'TGE']   # 不区分大小写，包含任一关键词才推送
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LAST_ID_FILE = os.path.join(BASE_DIR, 'last_id.json')
@@ -137,52 +138,36 @@ def scrape_nitter_with_playwright(target, dynamic_instances=None):
                 
                 # 扫描策略：扫描前 8 条推文，找到第一条非置顶的、有效的内容
                 valid_tweets = []
-                for item in items[:8]:
-                    # 1. 检查是否是置顶推文 (移除 "Pinned" text 匹配以防止误伤推文内容)
+                for item in items[:12]:
                     is_pinned = item.select_one('.pinned') is not None
                     if is_pinned:
                         print(f"[{target}] 发现置顶推文，跳过")
                         continue
                     
-                    # 2. 检查是否是转发
                     is_retweet = item.select_one('.retweet-header') is not None
 
-                    # 3. 提取图片 (增加更多可能的 Nitter 图片选择器)
                     images = []
                     img_els = item.select('.attachment.image img, .tweet-image img, .still-image img, .attachments img')
                     for img in img_els:
-                        # 排除头像 (通常在 .tweet-avatar 或 .profile-card-avatar 中)
                         if any(c in str(img.parent.get('class', [])) for c in ['avatar', 'profile']):
                             continue
-                            
                         src = img.get('src', '')
                         if src:
-                            # 转换相对路径
                             if src.startswith('//'):
                                 full_src = 'https:' + src
                             elif src.startswith('/'):
                                 full_src = instance.rstrip('/') + src
                             else:
                                 full_src = src
-                            
-                            # 还原原始 Twitter 图片链接以提高代理稳定性
                             full_src = get_original_image_url(full_src)
-                            
-                            # 过滤掉一些明显的表情包或小图标 (可选)
                             if 'emoji' in src.lower() or 'hashtag_click' in src:
                                 continue
-                                
                             images.append(full_src)
 
-                    # 4. 提取视频 (新增)
                     video_url = None
                     try:
-                        video_el = item.select_one('video source')
-                        if not video_el:
-                            video_el = item.select_one('video')
-                        
+                        video_el = item.select_one('video source') or item.select_one('video')
                         if video_el:
-                            # 尝试获取封面图作为额外图片
                             poster_el = item.select_one('video')
                             if poster_el:
                                 poster = poster_el.get('poster', '')
@@ -193,12 +178,9 @@ def scrape_nitter_with_playwright(target, dynamic_instances=None):
                                         full_poster = instance.rstrip('/') + poster
                                     else:
                                         full_poster = poster
-                                    # 尝试还原原始封面图地址并加入图片列表
                                     full_poster = get_original_image_url(full_poster)
                                     if full_poster not in images:
                                         images.append(full_poster)
-
-                            # 提取视频流地址
                             v_src = video_el.get('src', '')
                             if v_src:
                                 if v_src.startswith('//'):
@@ -210,7 +192,6 @@ def scrape_nitter_with_playwright(target, dynamic_instances=None):
                     except Exception as e:
                         print(f"[{target}] 视频提取异常: {e}")
 
-                    # 提取关键信息
                     content_el = item.select_one('.tweet-content')
                     link_el = item.select_one('.tweet-link')
                     date_el = item.select_one('.tweet-date a')
@@ -219,7 +200,6 @@ def scrape_nitter_with_playwright(target, dynamic_instances=None):
                     if not content_el or not link_el:
                         continue
 
-                    # 提取推文 ID (从 /user/status/123...#m 中提取数字)
                     link_href = link_el.get('href', '')
                     tweet_id = link_href.split('/status/')[-1].split('#')[0] if '/status/' in link_href else link_href
 
@@ -235,17 +215,14 @@ def scrape_nitter_with_playwright(target, dynamic_instances=None):
                     }
                     valid_tweets.append(tweet_data)
                     
-                    # 只要找到了第一个非置顶的有效推文，我们就认为它是当前“最新的”
-                    if len(valid_tweets) >= 1:
+                    if len(valid_tweets) >= 10:
                         break
 
                 if valid_tweets:
-                    tweet = valid_tweets[0]
-                    retweet_tag = " [转发]" if tweet['is_retweet'] else ""
-                    print(f"[{target}] 成功从 {instance} 抓取{retweet_tag}推文: {tweet['guid']}")
+                    print(f"[{target}] 成功从 {instance} 抓取到 {len(valid_tweets)} 条非置顶推文")
                     context.close()
                     browser.close()
-                    return tweet
+                    return valid_tweets   # 返回列表
 
                 print(f"[{target}] {instance} 页面上未找到符合条件的非置顶推文")
                 context.close()
@@ -507,6 +484,60 @@ def main():
 
         updated = False
         for target in USERS:
+            try:
+                tweets = scrape_nitter_with_playwright(target, instances)
+                if not tweets:
+                    continue
+                
+                last_id = last_ids.get(target)
+                
+                # 首次运行：只取最新 1 条（非置顶）
+                if not last_id:
+                    tweets = tweets[:1]
+                    print(f"[{target}] 首次运行，只处理最新 1 条")
+                else:
+                    # 先看前 5 条有没有 last_id
+                    found = False
+                    for t in tweets[:5]:
+                        if t['guid'] == last_id:
+                            found = True
+                            break
+                    if not found and len(tweets) > 5:
+                        print(f"[{target}] 前 5 条未找到 last_id，使用全部抓取结果继续比较")
+                
+                # 按时间从新到旧处理，找出所有比 last_id 新的推文
+                new_tweets = []
+                for t in tweets:
+                    if last_id and t['guid'] == last_id:
+                        break
+                    new_tweets.append(t)
+                
+                if not new_tweets:
+                    print(f"[{target}] 无新推文")
+                    continue
+                
+                # 反转，让最旧的先处理（保证顺序）
+                new_tweets.reverse()
+                
+                for tweet in new_tweets:
+                    content_lower = tweet['content'].lower()
+                    # 关键词过滤
+                    if not any(kw.lower() in content_lower for kw in KEYWORDS):
+                        print(f"[{target}] 跳过（不含关键词）: {tweet['guid']}")
+                        last_ids[target] = tweet['guid']  # 即使跳过也更新 ID，避免重复检查
+                        updated = True
+                        continue
+                    
+                    print(f"[{target}] 发现符合条件的新推文: {tweet['guid']}")
+                    if send_dingtalk(WEBHOOK_URL, tweet, target):
+                        last_ids[target] = tweet['guid']
+                        updated = True
+                    else:
+                        # 推送失败就停，下次再试
+                        break
+                        
+            except Exception as e:
+                print(f"[{target}] 处理异常: {e}")
             try:
                 tweet = scrape_nitter_with_playwright(target, instances)
                 if not tweet:
