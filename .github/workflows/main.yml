@@ -3,7 +3,7 @@ name: Twitter Monitor
 on:
   schedule:
     # UTC+8 09:00 - 23:00（对应 UTC 01:00 - 15:00）每 5 分钟一次
-    - cron: '*/5 1-15 * * *'
+    - cron: '*/5 1-14 * * *'
     # 其他时间每 15 分钟一次
     - cron: '*/15 0,16-23 * * *'
   workflow_dispatch:
