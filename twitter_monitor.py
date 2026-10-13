@@ -21,7 +21,7 @@ LAST_ID_FILE = os.path.join(BASE_DIR, 'last_id.json')
 
 # 运行模式配置
 LOOP_MODE = os.environ.get('LOOP_MODE', 'false').lower() == 'true'
-INTERVAL = int(os.environ.get('LOOP_INTERVAL', '600')) # 默认 10 分钟 (600秒)
+INTERVAL = int(os.environ.get('LOOP_INTERVAL', '600'))  # 默认 10 分钟 (600秒)
 
 # 备选 Nitter 实例 (仅作为域名参考)
 NITTER_INSTANCES = [
@@ -58,20 +58,18 @@ def load_instances():
                     return instances
         except Exception as e:
             print(f"[系统] 加载实例缓存失败: {e}")
-    
+
     print("[系统] 缓存不存在或损坏，采用内置兜底实例列表")
     return NITTER_INSTANCES
 
 def scrape_nitter_with_playwright(target, dynamic_instances=None):
     """
-    使用 Playwright 模拟浏览器访问 Nitter 并抓取最新推文
+    使用 Playwright 模拟浏览器访问 Nitter 并抓取最新推文（返回列表）
     """
     is_search = target.startswith('search:')
     keyword = target[7:] if is_search else target
-    
-    # 优先使用动态获取的实例，如果没有则用内置的
+
     instances = dynamic_instances if dynamic_instances else NITTER_INSTANCES.copy()
-    # 为了分布压力，我们在保持高分实例在前的前提下，对前 5 名进行小范围随机
     if len(instances) > 5:
         top_5 = instances[:5]
         random.shuffle(top_5)
@@ -80,31 +78,26 @@ def scrape_nitter_with_playwright(target, dynamic_instances=None):
         instances = top_5 + others
     else:
         random.shuffle(instances)
-    
+
     with sync_playwright() as p:
-        # 启动浏览器 (头模式/无头模式取决于环境，GitHub Actions 建议 headless=True)
         browser = p.chromium.launch(headless=True)
-        
+
         for instance in instances:
             try:
-                # 每个实例创建一个新上下文，模拟干净的访问
                 context = browser.new_context(
                     user_agent=get_random_user_agent(),
                     viewport={'width': 1280, 'height': 720}
                 )
                 page = context.new_page()
-                
-                # 应用 Stealth 插件绕过检测
                 stealth_sync(page)
-                
+
                 if is_search:
                     url = f"{instance.rstrip('/')}/search?f=tweets&q={requests.utils.quote(keyword)}"
                 else:
                     url = f"{instance.rstrip('/')}/{keyword}"
-                
+
                 print(f"[{target}] 正在加载: {url}")
-                
-                # 开始加载并处理可能的挑战
+
                 try:
                     response = page.goto(url, wait_until="networkidle", timeout=45000)
                     if response and response.status == 403:
@@ -115,35 +108,30 @@ def scrape_nitter_with_playwright(target, dynamic_instances=None):
                     print(f"[{target}] 加载 {instance} 超时或失败: {e}")
                     context.close()
                     continue
-                
-                # 智能等待浏览器验证或"稍等片刻"挑战
+
                 challenge_keywords = ["Verifying your browser", "Just a moment", "Checking your browser"]
-                for i in range(5): # 最多等待 25 秒
+                for i in range(5):
                     content = page.content()
                     if any(kw in content for kw in challenge_keywords):
                         print(f"[{target}] 检测到浏览器验证 ({i+1}/5)，尝试等待...")
                         page.wait_for_timeout(5000)
                     else:
                         break
-                
-                # 获取最终渲染后的 HTML
+
                 soup = BeautifulSoup(page.content(), 'html.parser')
-                
-                # Nitter 页面推文解析逻辑
                 items = soup.select('.timeline-item')
                 if not items:
                     print(f"[{target}] 在实例 {instance} 上未发现推文内容")
                     context.close()
                     continue
-                
-                # 扫描策略：扫描前 8 条推文，找到第一条非置顶的、有效的内容
+
                 valid_tweets = []
                 for item in items[:12]:
                     is_pinned = item.select_one('.pinned') is not None
                     if is_pinned:
                         print(f"[{target}] 发现置顶推文，跳过")
                         continue
-                    
+
                     is_retweet = item.select_one('.retweet-header') is not None
 
                     images = []
@@ -214,7 +202,7 @@ def scrape_nitter_with_playwright(target, dynamic_instances=None):
                         'video_url': video_url
                     }
                     valid_tweets.append(tweet_data)
-                    
+
                     if len(valid_tweets) >= 10:
                         break
 
@@ -222,7 +210,7 @@ def scrape_nitter_with_playwright(target, dynamic_instances=None):
                     print(f"[{target}] 成功从 {instance} 抓取到 {len(valid_tweets)} 条非置顶推文")
                     context.close()
                     browser.close()
-                    return valid_tweets   # 返回列表
+                    return valid_tweets
 
                 print(f"[{target}] {instance} 页面上未找到符合条件的非置顶推文")
                 context.close()
@@ -230,7 +218,7 @@ def scrape_nitter_with_playwright(target, dynamic_instances=None):
             except Exception as e:
                 print(f"[{target}] 访问 {instance} 出错: {e}")
                 continue
-        
+
         browser.close()
     return None
 
@@ -243,20 +231,17 @@ def upload_to_imgbb(image_url):
     if not api_key:
         print("[图床] ImgBB 未配置 API Key, 无法上传")
         return None
-    
+
     try:
-        # 下载图片
         print(f"[图床] 正在从 {image_url} 下载图片...")
         img_response = requests.get(image_url, timeout=30, headers={
             'User-Agent': get_random_user_agent(),
             'Referer': 'https://twitter.com/'
         })
         img_response.raise_for_status()
-        
-        # 转换为 base64
+
         img_base64 = base64.b64encode(img_response.content).decode('utf-8')
-        
-        # 上传到 ImgBB
+
         print("[图床] 正在上传到 ImgBB...")
         upload_response = requests.post(
             'https://api.imgbb.com/1/upload',
@@ -267,7 +252,7 @@ def upload_to_imgbb(image_url):
             timeout=30
         )
         result = upload_response.json()
-        
+
         if result.get('success'):
             url = result['data']['url']
             print(f"[图床] ImgBB 上传成功: {url}")
@@ -285,8 +270,6 @@ def upload_image_to_bed(image_url):
     """
     return upload_to_imgbb(image_url)
 
-
-
 def send_dingtalk(webhook_url, tweet, target):
     """
     发送钉钉消息
@@ -296,55 +279,45 @@ def send_dingtalk(webhook_url, tweet, target):
         return False
 
     retweet_flag = " 🔃 转发了" if tweet.get('is_retweet') else " 📝 发布了"
-    
-    # 尝试翻译内容
+
     print(f"[{target}] 正在翻译推文内容...")
-    
-    # 清理原文中的乱码或装饰性字符
+
     raw_content = tweet['content']
-    # 移除特定乱码序列 €∋
     clean_content = raw_content.replace('€∋', '').strip()
-    
+
     translated_content = translate_text(clean_content)
-    
-    # 构造内容展示 (如果有翻译则显示翻译+原文)
+
     if translated_content:
         display_content = f"""**翻译**: {translated_content}\n\n**原文**: {raw_content}"""
     else:
         display_content = f"""{raw_content}"""
 
-    # 构造图片 Markdown (优先使用图床,回退到代理)
     images_md = ""
     if tweet.get('images'):
-        # 检查是否启用图床上传
         use_image_bed = os.environ.get('USE_IMAGE_BED', 'true').lower() == 'true'
-        
+
         for img_url in tweet['images']:
             import urllib.parse
-            
+
             final_url = None
-            
-            # 方案1: 尝试上传到图床 (推荐)
+
             if use_image_bed:
                 print(f"[{target}] 正在上传图片到图床...")
                 final_url = upload_image_to_bed(img_url)
-            
-            # 方案2: 如果图床失败,使用代理服务
+
             if not final_url:
                 cloudflare_proxy = os.environ.get('CLOUDFLARE_PROXY', '').strip()
                 if cloudflare_proxy:
                     encoded_url = urllib.parse.quote(img_url)
                     final_url = f"{cloudflare_proxy.rstrip('/')}?url={encoded_url}"
                 else:
-                    # 回退到 wsrv.nl 代理
                     clean_url = img_url.replace('https://', '').replace('http://', '')
                     encoded_url = urllib.parse.quote(clean_url)
                     final_url = f"https://wsrv.nl/?url={encoded_url}"
-            
+
             if final_url:
                 images_md += f"\n\n![image]({final_url})"
 
-    # 如果有视频链接，添加观看链接
     if tweet.get('video_url'):
         images_md += f"\n\n[🎬 点击观看视频]({tweet['video_url']})"
 
@@ -385,15 +358,13 @@ def send_dingtalk(webhook_url, tweet, target):
 def get_original_image_url(nitter_url):
     """
     尝试从 Nitter 的代理 URL 中还原出 Twitter/X 的原始图片地址
-    例如: /pic/media%2FGDR-yXfbsAA_JmS.jpg -> pbs.twimg.com
     """
     import urllib.parse
     import re
     try:
         if 'pbs.twimg.com' in nitter_url:
             return nitter_url
-            
-        # 1. 处理 hex 编码的对象 (常见于 xcancel 等实例)
+
         if '/pic/enc/' in nitter_url:
             enc_part = nitter_url.split('/pic/enc/')[-1].split('?')[0]
             try:
@@ -403,28 +374,23 @@ def get_original_image_url(nitter_url):
             except:
                 pass
 
-        # 2. 处理标准 Nitter 路径
         path = urllib.parse.unquote(nitter_url)
-        
-        # 匹配 /pic/media/ID.ext 或 /pic/orig/media/ID.ext
+
         if '/media/' in path:
             media_part = path.split('/media/')[-1].split('?')[0]
             if '.' in media_part:
                 media_id, ext = media_part.rsplit('.', 1)
-                # 某些时候 ext 后面可能还跟着 &name=...
                 ext = ext.split('&')[0].split('?')[0]
                 return f"https://pbs.twimg.com/media/{media_id}?format={ext}&name=large"
 
-        # 3. 处理直接包含 pbs.twimg.com 的路径 (如 /pic/pbs.twimg.com/media/...)
         if 'pbs.twimg.com' in path:
-            # 提取从 pbs.twimg.com 开始的部分
             match = re.search(r'(pbs\.twimg\.com/media/[^?&]+)', path)
             if match:
                 return "https://" + match.group(1)
 
     except Exception as e:
         print(f"[图片解析] 还原 URL 失败 {nitter_url}: {e}")
-        
+
     return nitter_url
 
 def translate_text(text, target_lang='zh-CN'):
@@ -433,8 +399,7 @@ def translate_text(text, target_lang='zh-CN'):
     """
     if not text or not text.strip():
         return ""
-    
-    # 简单的翻译逻辑
+
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {
@@ -449,15 +414,14 @@ def translate_text(text, target_lang='zh-CN'):
         }
         resp = requests.get(url, params=params, headers=headers, timeout=15)
         resp.raise_for_status()
-        
-        # 解析返回的 JSON
+
         data = resp.json()
         if data and data[0]:
             translated_parts = [part[0] for part in data[0] if part[0]]
             return "".join(translated_parts)
     except Exception as e:
         print(f"[翻译] 失败: {e}")
-    
+
     return None
 
 def main():
@@ -466,21 +430,21 @@ def main():
         return
 
     print(f"[{datetime.now()}] 启动监控模式 (LOOP_MODE={LOOP_MODE}, INTERVAL={INTERVAL}s)...")
-    
-    # 从本地缓存加载可用实例
+
     instances = load_instances()
 
     while True:
         cycle_start = time.time()
         print(f"\n--- 启动新一轮监控轮询 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ---")
-        
-        # 加载状态 (每轮都重新加载，防止外部手动修改或异常)
+
         if os.path.exists(LAST_ID_FILE):
             try:
                 with open(LAST_ID_FILE, 'r', encoding='utf-8') as f:
                     last_ids = json.load(f)
-            except: last_ids = {}
-        else: last_ids = {}
+            except:
+                last_ids = {}
+        else:
+            last_ids = {}
 
         updated = False
         for target in USERS:
@@ -488,9 +452,13 @@ def main():
                 tweets = scrape_nitter_with_playwright(target, instances)
                 if not tweets:
                     continue
-                
+
+                # 兼容：如果返回的是单条 dict，转成列表
+                if isinstance(tweets, dict):
+                    tweets = [tweets]
+
                 last_id = last_ids.get(target)
-                
+
                 # 首次运行：只取最新 1 条（非置顶）
                 if not last_id:
                     tweets = tweets[:1]
@@ -504,30 +472,30 @@ def main():
                             break
                     if not found and len(tweets) > 5:
                         print(f"[{target}] 前 5 条未找到 last_id，使用全部抓取结果继续比较")
-                
-                # 按时间从新到旧处理，找出所有比 last_id 新的推文
+
+                # 找出所有比 last_id 新的推文
                 new_tweets = []
                 for t in tweets:
                     if last_id and t['guid'] == last_id:
                         break
                     new_tweets.append(t)
-                
+
                 if not new_tweets:
                     print(f"[{target}] 无新推文")
                     continue
-                
+
                 # 反转，让最旧的先处理（保证顺序）
                 new_tweets.reverse()
-                
+
                 for tweet in new_tweets:
                     content_lower = tweet['content'].lower()
                     # 关键词过滤
                     if not any(kw.lower() in content_lower for kw in KEYWORDS):
                         print(f"[{target}] 跳过（不含关键词）: {tweet['guid']}")
-                        last_ids[target] = tweet['guid']  # 即使跳过也更新 ID，避免重复检查
+                        last_ids[target] = tweet['guid']  # 即使跳过也更新 ID
                         updated = True
                         continue
-                    
+
                     print(f"[{target}] 发现符合条件的新推文: {tweet['guid']}")
                     if send_dingtalk(WEBHOOK_URL, tweet, target):
                         last_ids[target] = tweet['guid']
@@ -535,22 +503,7 @@ def main():
                     else:
                         # 推送失败就停，下次再试
                         break
-                        
-            except Exception as e:
-                print(f"[{target}] 处理异常: {e}")
-            try:
-                tweet = scrape_nitter_with_playwright(target, instances)
-                if not tweet:
-                    continue
-                
-                current_id = tweet['guid']
-                if last_ids.get(target) != current_id:
-                    print(f"[{target}] 发现更新: {current_id}")
-                    if send_dingtalk(WEBHOOK_URL, tweet, target):
-                        last_ids[target] = current_id
-                        updated = True
-                else:
-                    print(f"[{target}] 无视更新 (ID 未变)")
+
             except Exception as e:
                 print(f"[{target}] 处理异常: {e}")
 
@@ -562,8 +515,7 @@ def main():
         if not LOOP_MODE:
             print("[系统] 非循环模式，任务结束。")
             break
-        
-        # 计算需要 sleep 的时间，减去已经消耗的时间
+
         elapsed = time.time() - cycle_start
         sleep_time = max(10, INTERVAL - elapsed)
         print(f"--- 轮询结束。耗时 {elapsed:.1f}s，准备休眠 {sleep_time:.1f}s ---\n")
