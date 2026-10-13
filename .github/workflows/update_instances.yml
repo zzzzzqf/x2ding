@@ -2,29 +2,32 @@ name: Update Nitter Instances
 
 on:
   schedule:
-    # 每 6 小时运行一次
-    - cron: '0 */6 * * *'
+    # 每 6 小时运行一次（错峰到整点后 17 分钟，避开拥堵）
+    - cron: '17 */6 * * *'
   workflow_dispatch:
-    # 允许手动触发
+
+concurrency:
+  group: update-instances
+  cancel-in-progress: false
 
 jobs:
   update-instances:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: write
-      
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.9'
+        python-version: '3.11'
 
     - name: Install dependencies
-      run: |
-        pip install requests
+      run: pip install requests
 
     - name: Run update script
       run: |
@@ -32,16 +35,21 @@ jobs:
           python update_instances.py
         elif [ -f x/update_instances.py ]; then
           python x/update_instances.py
+        else
+          echo "update_instances.py not found" >&2
+          exit 1
         fi
 
     - name: Commit and push if changed
       run: |
-        git config --global user.name 'GitHub Action'
-        git config --global user.email 'action@github.com'
-        git add .
+        git config --global user.name 'github-actions[bot]'
+        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+        git add instances.json
         if git diff --staged --quiet; then
           echo "No changes to instances.json"
         else
           git commit -m "chore: update healthy nitter instances [skip ci]"
-          git push
+          git pull --rebase origin main
+          git push origin HEAD:main
         fi
